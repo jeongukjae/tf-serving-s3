@@ -1,0 +1,32 @@
+ARG TF_SERVING_DEVEL_IMAGE=tensorflow/serving:2.11.0-devel
+
+FROM ${TF_SERVING_DEVEL_IMAGE} AS base_build
+LABEL maintainer="jeongukjae@gmail.com"
+
+WORKDIR /
+
+WORKDIR /tensorflow-serving
+COPY tensorflow_serving.patch /tensorflow-serving/
+RUN git apply tensorflow_serving.patch && rm tensorflow_serving.patch
+
+FROM base_build as binary_build
+# Build, and install TensorFlow Serving
+ARG TF_SERVING_BUILD_OPTIONS="--config=release"
+RUN echo "Building with build options: ${TF_SERVING_BUILD_OPTIONS}"
+ARG TF_SERVING_BAZEL_OPTIONS=""
+RUN echo "Building with Bazel options: ${TF_SERVING_BAZEL_OPTIONS}"
+
+RUN bazel build --color=yes --curses=yes \
+    ${TF_SERVING_BAZEL_OPTIONS} \
+    --verbose_failures \
+    --output_filter=DONT_MATCH_ANYTHING \
+    ${TF_SERVING_BUILD_OPTIONS} \
+    tensorflow_serving/model_servers:tensorflow_model_server && \
+    cp bazel-bin/tensorflow_serving/model_servers/tensorflow_model_server \
+    /usr/local/bin/
+
+FROM binary_build as clean_build
+# Clean up Bazel cache when done.
+RUN bazel clean --expunge --color=yes && \
+    rm -rf /root/.cache
+CMD ["/bin/bash"]

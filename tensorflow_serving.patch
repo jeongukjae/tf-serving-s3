@@ -1,0 +1,557 @@
+diff --git a/tensorflow_serving/model_servers/BUILD b/tensorflow_serving/model_servers/BUILD
+index 57248c09..5b72db85 100644
+--- a/tensorflow_serving/model_servers/BUILD
++++ b/tensorflow_serving/model_servers/BUILD
+@@ -435,6 +435,7 @@ cc_library(
+     ],
+     deps = [
+         ":server_lib",
++        "//tensorflow_serving/model_servers/filesystem:s3_adapter_static",
+         "@org_tensorflow//tensorflow/c:c_api",
+         "@org_tensorflow//tensorflow/compiler/jit:xla_cpu_jit",
+         "@org_tensorflow//tensorflow/core:lib",
+diff --git a/tensorflow_serving/model_servers/filesystem/BUILD b/tensorflow_serving/model_servers/filesystem/BUILD
+new file mode 100644
+index 00000000..80537ad7
+--- /dev/null
++++ b/tensorflow_serving/model_servers/filesystem/BUILD
+@@ -0,0 +1,29 @@
++licenses(["notice"])
++
++package(default_visibility = ["//visibility:public"])
++
++cc_library(
++    name = "s3_adapter",
++    hdrs = ["s3_adapter.h"],
++    srcs = ["s3_adapter.cc"],
++    linkstatic = True,
++    deps = [
++        "@org_tensorflow//tensorflow/c/experimental/filesystem:filesystem_interface",
++        "@org_tensorflow_io//tensorflow_io/core/filesystems/s3",
++    ],
++    alwayslink = 1,
++)
++
++# This is a library that always links s3 filesystem.
++cc_library(
++    name = "s3_adapter_static",
++    srcs = ["s3_adapter_static.cc"],
++    linkstatic = True,
++    deps = [
++        ":s3_adapter",
++        "@org_tensorflow//tensorflow/c/experimental/filesystem:filesystem_interface",
++        "@org_tensorflow//tensorflow/c/experimental/filesystem:modular_filesystem",
++        "@org_tensorflow_io//tensorflow_io/core/filesystems/s3",
++    ],
++    alwayslink = 1,
++)
+diff --git a/tensorflow_serving/model_servers/filesystem/s3_adapter.cc b/tensorflow_serving/model_servers/filesystem/s3_adapter.cc
+new file mode 100644
+index 00000000..db1528b5
+--- /dev/null
++++ b/tensorflow_serving/model_servers/filesystem/s3_adapter.cc
+@@ -0,0 +1,18 @@
++#include "tensorflow_serving/model_servers/filesystem/s3_adapter.h"
++
++#include <stdlib.h>
++
++#include "tensorflow/c/experimental/filesystem/filesystem_interface.h"
++#include "tensorflow_io/core/filesystems/s3/s3_filesystem.h"
++
++void TF_InitPlugin(TF_FilesystemPluginInfo* info) {
++  info->plugin_memory_allocate = tensorflow::io::plugin_memory_allocate;
++  info->plugin_memory_free = tensorflow::io::plugin_memory_free;
++
++  info->num_schemes = 1;
++  info->ops = static_cast<TF_FilesystemPluginOps*>(
++      tensorflow::io::plugin_memory_allocate(info->num_schemes *
++                                             sizeof(info->ops[0])));
++
++  tensorflow::io::s3::ProvideFilesystemSupportFor(&info->ops[0], "s3");
++}
+diff --git a/tensorflow_serving/model_servers/filesystem/s3_adapter.h b/tensorflow_serving/model_servers/filesystem/s3_adapter.h
+new file mode 100644
+index 00000000..07fa11c0
+--- /dev/null
++++ b/tensorflow_serving/model_servers/filesystem/s3_adapter.h
+@@ -0,0 +1,29 @@
++#ifndef TENSORFLOW_SERVING_MODEL_SERVERS_FILESYSTEM_S3_ADAPTER_H_
++#define TENSORFLOW_SERVING_MODEL_SERVERS_FILESYSTEM_S3_ADAPTER_H_
++
++#include <stdlib.h>
++
++#include "tensorflow/c/experimental/filesystem/filesystem_interface.h"
++
++void TF_InitPlugin(TF_FilesystemPluginInfo* info);
++
++namespace tensorflow {
++namespace io {
++
++// Copied from tensorflow_io/core/filesystems/filesystem_plugins.h.
++static void* plugin_memory_allocate(size_t size) { return calloc(1, size); }
++static void plugin_memory_free(void* ptr) { free(ptr); }
++
++namespace s3 {
++
++// This function is defined in
++// tensorflow_io/core/filesystems/s3/s3_filesystem.cc. It is not exposed in
++// tensorflow_io/core/filesystems/s3/s3_filesystem.h, so we need to declare it
++// here.
++void ProvideFilesystemSupportFor(TF_FilesystemPluginOps* ops, const char* uri);
++
++}  // namespace s3
++}  // namespace io
++}  // namespace tensorflow
++
++#endif  // TENSORFLOW_SERVING_MODEL_SERVERS_FILESYSTEM_S3_ADAPTER_H_
+diff --git a/tensorflow_serving/model_servers/filesystem/s3_adapter_static.cc b/tensorflow_serving/model_servers/filesystem/s3_adapter_static.cc
+new file mode 100644
+index 00000000..1285df19
+--- /dev/null
++++ b/tensorflow_serving/model_servers/filesystem/s3_adapter_static.cc
+@@ -0,0 +1,22 @@
++#include "tensorflow/c/experimental/filesystem/modular_filesystem_registration.h"
++#include "tensorflow_io/core/filesystems/s3/s3_filesystem.h"
++#include "tensorflow_serving/model_servers/filesystem/s3_adapter.h"
++
++namespace tensorflow {
++
++// Register the S3 filesystems statically.
++bool RegisterS3Statically() {
++  TF_FilesystemPluginInfo info;
++  TF_InitPlugin(&info);
++  Status status = filesystem_registration::RegisterFilesystemPluginImpl(&info);
++  if (!status.ok()) {
++    VLOG(0) << "Static POSIX filesystem could not be registered: " << status;
++    return false;
++  }
++  return true;
++}
++
++// Perform the actual registration
++static bool unused = RegisterS3Statically();
++
++}  // namespace tensorflow
+diff --git a/tensorflow_serving/workspace.bzl b/tensorflow_serving/workspace.bzl
+index 251174a5..6837ce5f 100644
+--- a/tensorflow_serving/workspace.bzl
++++ b/tensorflow_serving/workspace.bzl
+@@ -129,3 +129,61 @@ def tf_serving_workspace():
+         recursive_init_submodules = True,
+         remote = "https://github.com/boostorg/boost",
+     )
++
++    # ==== TensorFlow IO ====
++    http_archive(
++        name = "org_tensorflow_io",
++        strip_prefix = "io-0.29.0",
++        sha256 = "a11235b83e1f695e2796128a25cf7881134d22c63f71a41ba729049912434fc9",
++        url = "https://github.com/tensorflow/io/archive/v0.29.0.zip",
++        patches = ["@//third_party/tfio:tfio.patch"],
++        patch_args = ["-p1"],
++    )
++
++    http_archive(
++        name = "aws-checksums",
++        build_file = "//third_party:aws-checksums.BUILD",
++        sha256 = "6e6bed6f75cf54006b6bafb01b3b96df19605572131a2260fddaf0e87949ced0",
++        strip_prefix = "aws-checksums-0.1.5",
++        urls = [
++            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/awslabs/aws-checksums/archive/v0.1.5.tar.gz",
++            "https://github.com/awslabs/aws-checksums/archive/v0.1.5.tar.gz",
++        ],
++    )
++
++    http_archive(
++        name = "aws-c-common",
++        build_file = "//third_party:aws-c-common.BUILD",
++        sha256 = "01c2a58553a37b3aa5914d9e0bf7bf14507ff4937bc5872a678892ca20fcae1f",
++        strip_prefix = "aws-c-common-0.4.29",
++        urls = [
++            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/awslabs/aws-c-common/archive/v0.4.29.tar.gz",
++            "https://github.com/awslabs/aws-c-common/archive/v0.4.29.tar.gz",
++        ],
++    )
++
++    http_archive(
++        name = "aws-c-event-stream",
++        build_file = "//third_party:aws-c-event-stream.BUILD",
++        sha256 = "31d880d1c868d3f3df1e1f4b45e56ac73724a4dc3449d04d47fc0746f6f077b6",
++        strip_prefix = "aws-c-event-stream-0.1.4",
++        urls = [
++            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/awslabs/aws-c-event-stream/archive/v0.1.4.tar.gz",
++            "https://github.com/awslabs/aws-c-event-stream/archive/v0.1.4.tar.gz",
++        ],
++    )
++
++    http_archive(
++        name = "aws-sdk-cpp",
++        build_file = "//third_party:aws-sdk-cpp.BUILD",
++        patch_cmds = [
++            """sed -i.bak 's/UUID::RandomUUID/Aws::Utils::UUID::RandomUUID/g' aws-cpp-sdk-core/source/client/AWSClient.cpp""",
++            """sed -i.bak 's/__attribute__((visibility("default")))//g' aws-cpp-sdk-core/include/aws/core/external/tinyxml2/tinyxml2.h """,
++        ],
++        sha256 = "749322a8be4594472512df8a21d9338d7181c643a00e08a0ff12f07e831e3346",
++        strip_prefix = "aws-sdk-cpp-1.8.186",
++        urls = [
++            "https://storage.googleapis.com/mirror.tensorflow.org/github.com/aws/aws-sdk-cpp/archive/1.8.186.tar.gz",
++            "https://github.com/aws/aws-sdk-cpp/archive/1.8.186.tar.gz",
++        ],
++    )
+diff --git a/third_party/BUILD b/third_party/BUILD
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/third_party/aws-c-common.BUILD b/third_party/aws-c-common.BUILD
+new file mode 100644
+index 00000000..89473d3f
+--- /dev/null
++++ b/third_party/aws-c-common.BUILD
+@@ -0,0 +1,46 @@
++# Description:
++#   AWS C Common
++
++package(default_visibility = ["//visibility:public"])
++
++licenses(["notice"])  # Apache 2.0
++
++exports_files(["LICENSE"])
++
++cc_library(
++    name = "aws-c-common",
++    srcs = glob([
++        "include/aws/common/*.h",
++        "include/aws/common/private/*.h",
++        "source/*.c",
++    ]) + select({
++        "@bazel_tools//src/conditions:windows": glob([
++            "source/windows/*.c",
++        ]),
++        "//conditions:default": glob([
++            "source/posix/*.c",
++        ]),
++    }),
++    hdrs = [
++        "include/aws/common/config.h",
++    ],
++    defines = [],
++    includes = [
++        "include",
++    ],
++    textual_hdrs = glob([
++        "include/**/*.inl",
++    ]),
++    deps = [],
++)
++
++genrule(
++    name = "config_h",
++    srcs = [
++        "include/aws/common/config.h.in",
++    ],
++    outs = [
++        "include/aws/common/config.h",
++    ],
++    cmd = "sed 's/cmakedefine/undef/g' $< > $@",
++)
+diff --git a/third_party/aws-c-event-stream.BUILD b/third_party/aws-c-event-stream.BUILD
+new file mode 100644
+index 00000000..6db072f7
+--- /dev/null
++++ b/third_party/aws-c-event-stream.BUILD
+@@ -0,0 +1,26 @@
++# Description:
++#   AWS C Event Stream
++
++package(default_visibility = ["//visibility:public"])
++
++licenses(["notice"])  # Apache 2.0
++
++exports_files(["LICENSE"])
++
++cc_library(
++    name = "aws-c-event-stream",
++    srcs = glob([
++        "include/**/*.h",
++        "source/**/*.c",
++    ]),
++    hdrs = [
++    ],
++    defines = [],
++    includes = [
++        "include",
++    ],
++    deps = [
++        "@aws-c-common",
++        "@aws-checksums",
++    ],
++)
+diff --git a/third_party/aws-checksums.BUILD b/third_party/aws-checksums.BUILD
+new file mode 100644
+index 00000000..3383f223
+--- /dev/null
++++ b/third_party/aws-checksums.BUILD
+@@ -0,0 +1,42 @@
++# Description:
++#   AWS CheckSums
++
++package(default_visibility = ["//visibility:public"])
++
++licenses(["notice"])  # Apache 2.0
++
++exports_files(["LICENSE"])
++
++cc_library(
++    name = "aws-checksums",
++    srcs = glob([
++        "include/aws/checksums/*.h",
++        "include/aws/checksums/private/*.h",
++        "source/*.c",
++    ]) + [
++        "crc_hw.c",
++    ],
++    hdrs = [],
++    defines = [],
++    includes = [
++        "include",
++    ],
++    deps = [],
++)
++
++genrule(
++    name = "crc_hw_c",
++    outs = ["crc_hw.c"],
++    cmd = "\n".join([
++        "cat <<'EOF' >$@",
++        "#include <aws/checksums/private/cpuid.h>",
++        "#include <aws/checksums/private/crc_priv.h>",
++        "int aws_checksums_do_cpu_id(int32_t *cpuid) {",
++        "    return 0;",
++        "}",
++        "uint32_t aws_checksums_crc32c_hw(const uint8_t *input, int length, uint32_t previousCrc32) {",
++        "  return aws_checksums_crc32c_sw(input, length, previousCrc32);",
++        "}",
++        "EOF",
++    ]),
++)
+diff --git a/third_party/aws-sdk-cpp.BUILD b/third_party/aws-sdk-cpp.BUILD
+new file mode 100644
+index 00000000..ba7d90bc
+--- /dev/null
++++ b/third_party/aws-sdk-cpp.BUILD
+@@ -0,0 +1,180 @@
++# Description:
++#   AWS C++ SDK
++
++package(default_visibility = ["//visibility:public"])
++
++licenses(["notice"])  # Apache 2.0
++
++exports_files(["LICENSE"])
++
++cc_library(
++    name = "core",
++    srcs = glob([
++        "aws-cpp-sdk-core/source/*.cpp",  # AWS_SOURCE
++        "aws-cpp-sdk-core/source/external/tinyxml2/*.cpp",  # AWS_TINYXML2_SOURCE
++        "aws-cpp-sdk-core/source/external/cjson/*.cpp",  # CJSON_SOURCE
++        "aws-cpp-sdk-core/source/auth/*.cpp",  # AWS_AUTH_SOURCE
++        "aws-cpp-sdk-core/source/client/*.cpp",  # AWS_CLIENT_SOURCE
++        "aws-cpp-sdk-core/source/internal/*.cpp",  # AWS_INTERNAL_SOURCE
++        "aws-cpp-sdk-core/source/aws/model/*.cpp",  # AWS_MODEL_SOURCE
++        "aws-cpp-sdk-core/source/http/*.cpp",  # HTTP_SOURCE
++        "aws-cpp-sdk-core/source/http/standard/*.cpp",  # HTTP_STANDARD_SOURCE
++        "aws-cpp-sdk-core/source/config/*.cpp",  # CONFIG_SOURCE
++        "aws-cpp-sdk-core/source/monitoring/*.cpp",  # MONITORING_SOURCE
++        "aws-cpp-sdk-core/source/utils/*.cpp",  # UTILS_SOURCE
++        "aws-cpp-sdk-core/source/utils/event/*.cpp",  # UTILS_EVENT_SOURCE
++        "aws-cpp-sdk-core/source/utils/base64/*.cpp",  # UTILS_BASE64_SOURCE
++        "aws-cpp-sdk-core/source/utils/crypto/*.cpp",  # UTILS_CRYPTO_SOURCE
++        "aws-cpp-sdk-core/source/utils/json/*.cpp",  # UTILS_JSON_SOURCE
++        "aws-cpp-sdk-core/source/utils/threading/*.cpp",  # UTILS_THREADING_SOURCE
++        "aws-cpp-sdk-core/source/utils/xml/*.cpp",  # UTILS_XML_SOURCE
++        "aws-cpp-sdk-core/source/utils/logging/*.cpp",  # UTILS_LOGGING_SOURCE
++        "aws-cpp-sdk-core/source/utils/memory/*.cpp",  # UTILS_MEMORY_SOURCE
++        "aws-cpp-sdk-core/source/utils/memory/stl/*.cpp",  # UTILS_MEMORY_STL_SOURCE
++        "aws-cpp-sdk-core/source/utils/stream/*.cpp",  # UTILS_STREAM_SOURCE
++        "aws-cpp-sdk-core/source/utils/crypto/factory/*.cpp",  # UTILS_CRYPTO_FACTORY_SOURCE
++        "aws-cpp-sdk-core/source/http/curl/*.cpp",  # HTTP_CURL_CLIENT_SOURCE
++        "aws-cpp-sdk-core/source/utils/crypto/openssl/*.cpp",  # UTILS_CRYPTO_OPENSSL_SOURCE
++    ]) + select({
++        "@bazel_tools//src/conditions:windows": glob([
++            "aws-cpp-sdk-core/source/net/windows/*.cpp",  # NET_SOURCE
++            "aws-cpp-sdk-core/source/platform/windows/*.cpp",  # PLATFORM_WINDOWS_SOURCE
++        ]),
++        "//conditions:default": glob([
++            "aws-cpp-sdk-core/source/net/linux-shared/*.cpp",  # NET_SOURCE
++            "aws-cpp-sdk-core/source/platform/linux-shared/*.cpp",  # PLATFORM_LINUX_SHARED_SOURCE
++        ]),
++    }),
++    hdrs = [
++        "aws-cpp-sdk-core/include/aws/core/SDKConfig.h",
++    ] + glob([
++        "aws-cpp-sdk-core/include/aws/core/*.h",  # AWS_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/auth/*.h",  # AWS_AUTH_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/client/*.h",  # AWS_CLIENT_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/internal/*.h",  # AWS_INTERNAL_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/net/*.h",  # NET_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/http/*.h",  # HTTP_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/http/standard/*.h",  # HTTP_STANDARD_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/config/*.h",  # CONFIG_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/monitoring/*.h",  # MONITORING_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/platform/*.h",  # PLATFORM_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/*.h",  # UTILS_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/event/*.h",  # UTILS_EVENT_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/base64/*.h",  # UTILS_BASE64_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/crypto/*.h",  # UTILS_CRYPTO_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/json/*.h",  # UTILS_JSON_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/threading/*.h",  # UTILS_THREADING_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/xml/*.h",  # UTILS_XML_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/memory/*.h",  # UTILS_MEMORY_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/memory/stl/*.h",  # UTILS_STL_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/logging/*.h",  # UTILS_LOGGING_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/ratelimiter/*.h",  # UTILS_RATE_LIMITER_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/stream/*.h",  # UTILS_STREAM_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/external/cjson/*.h",  # CJSON_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/external/tinyxml2/*.h",  # TINYXML2_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/http/curl/*.h",  # HTTP_CURL_CLIENT_HEADERS
++        "aws-cpp-sdk-core/include/aws/core/utils/crypto/openssl/*.h",  # UTILS_CRYPTO_OPENSSL_HEADERS
++    ]),
++    defines = [
++        'AWS_SDK_VERSION_STRING=\\"1.7.366\\"',
++        "AWS_SDK_VERSION_MAJOR=1",
++        "AWS_SDK_VERSION_MINOR=7",
++        "AWS_SDK_VERSION_PATCH=366",
++        "ENABLE_OPENSSL_ENCRYPTION=1",
++        "ENABLE_CURL_CLIENT=1",
++        "OPENSSL_IS_BORINGSSL=1",
++    ] + select({
++        "@bazel_tools//src/conditions:windows": [
++            "PLATFORM_WINDOWS",
++            "WIN32_LEAN_AND_MEAN",
++        ],
++        "//conditions:default": [
++            "PLATFORM_LINUX",
++        ],
++    }),
++    includes = [
++        "aws-cpp-sdk-core/include",
++    ],
++    linkopts = select({
++        "@bazel_tools//src/conditions:windows": [
++            "-DEFAULTLIB:userenv.lib",
++            "-DEFAULTLIB:version.lib",
++        ],
++        "//conditions:default": [],
++    }),
++    deps = [
++        "@aws-c-event-stream",
++        "@boringssl//:crypto",
++        "@boringssl//:ssl",
++        "@curl",
++    ],
++)
++
++cc_library(
++    name = "s3",
++    srcs = glob([
++        "aws-cpp-sdk-s3/source/*.cpp",  # AWS_S3_SOURCE
++        "aws-cpp-sdk-s3/source/model/*.cpp",  # AWS_S3_MODEL_SOURCE
++    ]),
++    hdrs = glob([
++        "aws-cpp-sdk-s3/include/aws/s3/*.h",  # AWS_S3_HEADERS
++        "aws-cpp-sdk-s3/include/aws/s3/model/*.h",  # AWS_S3_MODEL_HEADERS
++    ]),
++    includes = [
++        "aws-cpp-sdk-s3/include",
++    ],
++    deps = [
++        ":core",
++    ],
++)
++
++cc_library(
++    name = "transfer",
++    srcs = glob([
++        "aws-cpp-sdk-transfer/source/transfer/*.cpp",  # TRANSFER_SOURCE
++    ]),
++    hdrs = glob([
++        "aws-cpp-sdk-transfer/include/aws/transfer/*.h",  # TRANSFER_HEADERS
++    ]),
++    includes = [
++        "aws-cpp-sdk-transfer/include",
++    ],
++    deps = [
++        ":core",
++        ":s3",
++    ],
++)
++
++cc_library(
++    name = "kinesis",
++    srcs = glob([
++        "aws-cpp-sdk-kinesis/source/*.cpp",  # AWS_KINESIS_SOURCE
++        "aws-cpp-sdk-kinesis/source/model/*.cpp",  # AWS_KINESIS_MODEL_SOURCE
++    ]),
++    hdrs = glob([
++        "aws-cpp-sdk-kinesis/include/aws/kinesis/*.h",  # AWS_KINESIS_HEADERS
++        "aws-cpp-sdk-kinesis/include/aws/kinesis/model/*.h",  # AWS_KINESIS_MODEL_HEADERS
++    ]),
++    includes = [
++        "aws-cpp-sdk-kinesis/include",
++    ],
++    deps = [
++        ":core",
++    ],
++)
++
++genrule(
++    name = "SDKConfig_h",
++    outs = [
++        "aws-cpp-sdk-core/include/aws/core/SDKConfig.h",
++    ],
++    cmd = "\n".join([
++        "cat <<'EOF' >$@",
++        "#define USE_AWS_MEMORY_MANAGEMENT",
++        "#if defined(_MSC_VER)",
++        "#include <Windows.h>",
++        "#undef IGNORE",
++        "#endif",
++        "EOF",
++    ]),
++)
+diff --git a/third_party/tfio/BUILD b/third_party/tfio/BUILD
+new file mode 100644
+index 00000000..e69de29b
+diff --git a/third_party/tfio/tfio.patch b/third_party/tfio/tfio.patch
+new file mode 100644
+index 00000000..7bd2c735
+--- /dev/null
++++ b/third_party/tfio/tfio.patch
+@@ -0,0 +1,27 @@
++diff --git a/tensorflow_io/core/filesystems/BUILD b/tensorflow_io/core/filesystems/BUILD
++index 9276208f..204d2740 100644
++--- a/tensorflow_io/core/filesystems/BUILD
+++++ b/tensorflow_io/core/filesystems/BUILD
++@@ -11,18 +11,13 @@ cc_library(
++     name = "filesystem_plugins_header",
++     srcs = [
++         "filesystem_plugins.h",
++-    ] + select({
++-        "@bazel_tools//src/conditions:windows": [
++-            "@local_config_tf//:stub/libtensorflow_framework.lib",
++-        ],
++-        "//conditions:default": [
++-            "@local_config_tf//:stub/libtensorflow_framework.so",
++-        ],
++-    }),
+++    ],
++     copts = tf_io_copts(),
++     linkstatic = True,
++     deps = [
++-        "@local_config_tf//:tf_c_header_lib",
+++        "@org_tensorflow//tensorflow/c:c_api_macros",
+++        "@org_tensorflow//tensorflow/c:logging",
+++        "@org_tensorflow//tensorflow/c/experimental/filesystem:modular_filesystem",
++     ],
++     alwayslink = 1,
++ )
