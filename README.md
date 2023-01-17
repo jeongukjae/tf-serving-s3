@@ -24,7 +24,7 @@ $ docker run \
 
 ## What is the differences/details?
 
-Check this blog post: <>
+Check this blog post: <https://blog.ukjae.io/posts/enabling-s3-filesystem-support-for-tensorflow-serving/>
 
 ## How to build the image?
 
